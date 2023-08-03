@@ -1,0 +1,171 @@
+import rlkit.torch.pytorch_util as ptu
+from rlkit.data_management.env_replay_buffer import EnvReplayBuffer
+from rlkit.launchers.launcher_util import setup_logger
+from rlkit.samplers.data_collector import MdpPathCollector
+from rlkit.torch.sac.policies import TanhGaussianPolicy, MakeDeterministic
+from rlkit.torch.sac.sac import SACTrainer
+from rlkit.torch.networks import ConcatMlp
+from rlkit.torch.torch_rl_algorithm import TorchBatchRLAlgorithm
+
+from environments.IP_env.IP_enviroment import IPBasic
+from environments.DIP_env.DIP_enviroment import DIPBasic
+from environments.MVA_env.mva_enviroment import MVABasic
+from environments.MVA2_env.mva2_enviroment import MVA2Basic
+from environments.MVA3_env.mva3_enviroment import MVA3Basic
+from environments.MVA4_env.mva4_enviroment import MVA4Basic
+from environments.MVA5_env.mva5_enviroment import MVA5Basic
+from environments.Simulink_env.simulink_environment import SimulinkBasic
+# from osim.env import L2M2019Env
+
+# import gymnasium as gym
+import gym
+import os
+os.environ['KMP_DUPLICATE_LIB_OK']='True'
+
+def experiment(variant):
+    expl_render = True
+    eval_render = True
+    if variant['env_name'] == "MVA_simple":
+        expl_env = MVABasic(if_render=expl_render, eval_env=False)
+        eval_env = MVABasic(if_render=eval_render, eval_env=True)
+    elif variant['env_name'] == "MVA2_simple":
+        expl_env = MVA2Basic(if_render=expl_render, eval_env=False)
+        eval_env = MVA2Basic(if_render=eval_render, eval_env=True, if_save_figure=True)
+    elif variant['env_name'] == "MVA3_simple":
+        expl_env = MVA3Basic(if_render=expl_render, eval_env=False)
+        eval_env = MVA3Basic(if_render=eval_render, eval_env=True)
+    elif variant['env_name'] == "MVA4_simple":
+        expl_env = MVA4Basic(if_render=expl_render, eval_env=False)
+        eval_env = MVA4Basic(if_render=eval_render, eval_env=True)
+    elif variant['env_name'] == "MVA5_simple":
+        expl_env = MVA5Basic(if_render=expl_render, eval_env=False)
+        eval_env = MVA5Basic(if_render=eval_render, eval_env=True)
+    elif variant['env_name'] == "SimulinkBasic":
+        expl_env = SimulinkBasic(if_render=expl_render, eval_env=False)
+        eval_env = SimulinkBasic(if_render=eval_render, eval_env=True)
+    elif variant['env_name'] == "IPBasic":
+        expl_env = IPBasic()
+        eval_env = IPBasic()
+    elif variant['env_name'] == "DIPBasic":
+        expl_env = DIPBasic()
+        eval_env = DIPBasic()
+    elif variant['env_name'] == "osim":
+        expl_env = L2M2019Env(visualize=True)
+        eval_env = L2M2019Env(visualize=True)
+    else:
+        expl_env = gym.make(variant['env_name'])
+        eval_env = gym.make(variant['env_name'])
+    obs_dim = expl_env.observation_space.low.size
+    action_dim = eval_env.action_space.low.size
+
+    M = variant['layer_size']
+    qf1 = ConcatMlp(
+        input_size=obs_dim + action_dim,
+        output_size=1,
+        hidden_sizes=[M, M],
+    )
+    qf2 = ConcatMlp(
+        input_size=obs_dim + action_dim,
+        output_size=1,
+        hidden_sizes=[M, M],
+    )
+    target_qf1 = ConcatMlp(
+        input_size=obs_dim + action_dim,
+        output_size=1,
+        hidden_sizes=[M, M],
+    )
+    target_qf2 = ConcatMlp(
+        input_size=obs_dim + action_dim,
+        output_size=1,
+        hidden_sizes=[M, M],
+    )
+    policy = TanhGaussianPolicy(
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        hidden_sizes=[M, M],
+    )
+    eval_policy = MakeDeterministic(policy)
+    eval_path_collector = MdpPathCollector(
+        eval_env,
+        eval_policy,
+        render=eval_render,
+    )
+    expl_path_collector = MdpPathCollector(
+        expl_env,
+        policy,
+        render=expl_render,
+    )
+    replay_buffer = EnvReplayBuffer(
+        variant['replay_buffer_size'],
+        expl_env,
+    )
+    trainer = SACTrainer(
+        env=eval_env,
+        policy=policy,
+        qf1=qf1,
+        qf2=qf2,
+        target_qf1=target_qf1,
+        target_qf2=target_qf2,
+        **variant['trainer_kwargs']
+    )
+    algorithm = TorchBatchRLAlgorithm(
+        trainer=trainer,
+        exploration_env=expl_env,
+        evaluation_env=eval_env,
+        exploration_data_collector=expl_path_collector,
+        evaluation_data_collector=eval_path_collector,
+        replay_buffer=replay_buffer,
+        **variant['algorithm_kwargs']
+    )
+    algorithm.to(ptu.device)
+    algorithm.train()
+    expl_env.close()  # expl_env.env.close()
+    eval_env.close()  # eval_env.env.close()
+
+
+k_steps = (60*60/20+1)*2
+# k_steps = 2000
+
+if __name__ == "__main__":
+    # noinspection PyTypeChecker
+    variant = dict(
+        algorithm="SAC",
+        version="normal",
+        layer_size=256,
+        replay_buffer_size=int(1E6),
+        algorithm_kwargs=dict(
+            num_epochs=5000,
+            num_eval_steps_per_epoch=k_steps,
+            num_trains_per_train_loop=1000,
+            num_expl_steps_per_train_loop=k_steps,
+            min_num_steps_before_training=k_steps,
+            max_path_length=k_steps,
+            batch_size=256,
+        ),
+        trainer_kwargs=dict(
+            discount=0.99,
+            soft_target_tau=5e-3,
+            target_update_period=1,
+            policy_lr=3E-4,
+            qf_lr=3E-4,
+            reward_scale=1,
+            use_automatic_entropy_tuning=True,
+            target_entropy=None,
+        ),
+        # env_name ="MVA_simple"
+        # env_name="MVA2_simple"
+        # env_name="MVA3_simple"M
+
+        # env_name="MVA4_simple"
+        # env_name="SimulinkBasic"
+        env_name="DIPBasic"M
+
+        # env_name="Pendulum-v1"
+        # env_name="MountainCarContinuous-v0"
+        # env_name="BipedalWalker-v3"
+        # env_name="LunarLander-v2"
+        # env_name="osim"
+    )
+    setup_logger(variant['env_name'], variant=variant)
+    ptu.set_gpu_mode(False)  # optionally set the GPU (default=False)
+    experiment(variant)
